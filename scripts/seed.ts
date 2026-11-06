@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../app/db/schema";
+import { calculatePppPrice } from "../app/lib/ppp";
 import {
   UserRole,
   CourseStatus,
@@ -29,6 +30,20 @@ function daysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString();
+}
+
+/**
+ * Deterministic PRNG (mulberry32) so generated data is identical on every run.
+ * Returns a float in [0, 1).
+ */
+function createRandom(seed: number) {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function slugify(title: string): string {
@@ -1913,17 +1928,84 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Generated Students (analytics data) ───
+  // Extra students per course with enrollments and purchases spread over the
+  // last ~90 days, so the instructor dashboard has meaningful figures.
+  // Deterministic: the same seed produces the same rows on every run.
+
+  const random = createRandom(20261106);
+  const pick = <T,>(items: readonly T[]) => items[Math.floor(random() * items.length)];
+  const fullPriceCountries = ["US", "CA", "GB", "AU", "DE", "FR", "NL", "SE"] as const;
+  const pppCountries = ["MX", "BR", "PL", "IN", "CO", "PH", "NG", "KE"] as const;
+  const firstNames = [
+    "Ava", "Ben", "Chloe", "Diego", "Elena", "Felix", "Grace", "Hiro", "Isla", "Jonah",
+    "Kira", "Leo", "Maya", "Nico", "Omar", "Priya", "Quinn", "Rosa", "Sam", "Tara",
+  ] as const;
+  const lastNames = [
+    "Adams", "Baker", "Costa", "Diaz", "Evans", "Fischer", "Gupta", "Hughes", "Ito", "Jensen",
+    "Khan", "Lopez", "Mendes", "Nakamura", "Okafor", "Patel", "Reyes", "Silva", "Tan", "Weber",
+  ] as const;
+
+  let generatedStudentCount = 0;
+  let generatedPurchaseCount = 0;
+
+  for (const course of [course1, course2]) {
+    const studentTotal = 25 + Math.floor(random() * 16); // 25–40
+
+    for (let i = 0; i < studentTotal; i++) {
+      generatedStudentCount++;
+      const enrolledDaysAgo = 1 + Math.floor(random() * 89); // 1–89 days ago
+      const enrolledAt = daysAgo(enrolledDaysAgo);
+      const isPpp = random() < 0.25;
+      const country = isPpp ? pick(pppCountries) : pick(fullPriceCountries);
+
+      const [student] = db
+        .insert(schema.users)
+        .values({
+          name: `${pick(firstNames)} ${pick(lastNames)}`,
+          email: `generated.student${generatedStudentCount}@example.com`,
+          role: UserRole.Student,
+          createdAt: daysAgo(enrolledDaysAgo + Math.floor(random() * 30)),
+        })
+        .returning()
+        .all();
+
+      db.insert(schema.enrollments)
+        .values({ userId: student.id, courseId: course.id, enrolledAt })
+        .run();
+
+      db.insert(schema.purchases)
+        .values({
+          userId: student.id,
+          courseId: course.id,
+          amountPaid: calculatePppPrice(course.price, country),
+          country,
+          createdAt: enrolledAt,
+        })
+        .run();
+      generatedPurchaseCount++;
+    }
+  }
+
+  console.log(
+    `Created ${generatedStudentCount} generated students with enrollments and ${generatedPurchaseCount} purchases.`
+  );
+
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${9 + generatedStudentCount} (1 admin, 2 instructors, ${6 + generatedStudentCount} students)`
+  );
   console.log("  Categories: 5");
   console.log(
     `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
+  console.log(`  Enrollments: ${7 + generatedStudentCount}`);
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
+  console.log(
+    `  Purchases: ${6 + generatedPurchaseCount} (${5 + generatedPurchaseCount} individual + 1 team)`
+  );
   console.log("  Teams: 1 (with 5 coupons)");
 }
 

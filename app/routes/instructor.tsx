@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
@@ -11,6 +11,19 @@ import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-reac
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
+import {
+  getInstructorOverview,
+  parseRange,
+  RANGE_OPTIONS,
+} from "~/services/instructorAnalyticsService";
+import { formatCents, PLATFORM_FEE_RATE } from "~/lib/revenue";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 
 export function meta() {
   return [
@@ -56,7 +69,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats };
+  const range = parseRange(new URL(request.url).searchParams.get("range"));
+  const overview = getInstructorOverview(currentUserId, range);
+
+  return { courses: coursesWithStats, overview };
 }
 
 function statusBadge(status: string) {
@@ -121,7 +137,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses } = loaderData;
+  const { courses, overview } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -148,6 +164,8 @@ export default function InstructorDashboard({
           </Button>
         </Link>
       </div>
+
+      {courses.length > 0 && <SummaryStrip overview={overview} />}
 
       {courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -219,6 +237,139 @@ export default function InstructorDashboard({
         </div>
       )}
     </div>
+  );
+}
+
+type Overview = ReturnType<typeof getInstructorOverview>;
+
+function SummaryStrip({ overview }: { overview: Overview }) {
+  const [, setSearchParams] = useSearchParams();
+  const feePercent = Math.round(PLATFORM_FEE_RATE * 100);
+  const comparison =
+    RANGE_OPTIONS.find((option) => option.range === overview.range)?.comparison ?? null;
+
+  return (
+    <section aria-labelledby="summary-heading" className="mb-8">
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <h2 id="summary-heading" className="text-lg font-semibold">
+          Sales &amp; enrollments
+        </h2>
+        <Select
+          value={overview.range}
+          onValueChange={(value) =>
+            setSearchParams(
+              (params) => {
+                params.set("range", value);
+                return params;
+              },
+              { preventScrollReset: true }
+            )
+          }
+        >
+          <SelectTrigger className="w-40" aria-label="Time range">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RANGE_OPTIONS.map(({ range, label }) => (
+              <SelectItem key={range} value={range}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Metric
+          label="Revenue"
+          value={formatCents(overview.current.revenue)}
+          current={overview.current.revenue}
+          previous={overview.previous?.revenue}
+          comparison={comparison}
+        />
+        <Metric
+          label="Your earnings (est.)"
+          value={formatCents(overview.current.earnings)}
+          current={overview.current.earnings}
+          previous={overview.previous?.earnings}
+          comparison={comparison}
+          footnote={`After ${feePercent}% platform fee`}
+        />
+        <Metric
+          label="New enrollments"
+          value={overview.current.newEnrollments.toLocaleString("en-US")}
+          current={overview.current.newEnrollments}
+          previous={overview.previous?.newEnrollments}
+          comparison={comparison}
+        />
+      </div>
+    </section>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  current,
+  previous,
+  comparison,
+  footnote,
+}: {
+  label: string;
+  value: string;
+  current: number;
+  previous: number | undefined;
+  comparison: string | null;
+  footnote?: string;
+}) {
+  return (
+    <Card className="gap-1 py-4">
+      <CardHeader className="px-4">
+        <p className="text-sm text-muted-foreground">{label}</p>
+      </CardHeader>
+      <CardContent className="px-4">
+        <p className="text-2xl font-bold">{value}</p>
+        {previous !== undefined && comparison && (
+          <Change current={current} previous={previous} comparison={comparison} />
+        )}
+        {footnote && (
+          <p className="mt-1 text-xs text-muted-foreground">{footnote}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Change({
+  current,
+  previous,
+  comparison,
+}: {
+  current: number;
+  previous: number;
+  comparison: string;
+}) {
+
+  if (previous === 0) {
+    return (
+      <p className="mt-1 text-xs text-muted-foreground">
+        {current === 0 ? "No change" : "New"} {comparison}
+      </p>
+    );
+  }
+
+  const percent = Math.round(((current - previous) / previous) * 100);
+  const tone =
+    percent > 0
+      ? "text-green-700 dark:text-green-400"
+      : percent < 0
+        ? "text-red-700 dark:text-red-400"
+        : "text-muted-foreground";
+
+  return (
+    <p className={`mt-1 text-xs ${tone}`}>
+      {percent > 0 ? "+" : ""}
+      {percent}% {comparison}
+    </p>
   );
 }
 
